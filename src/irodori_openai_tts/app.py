@@ -283,7 +283,10 @@ async def create_temporal_speaker_state(
     output_path = (
         Path(voice_registry.ensure_dir()) / f"{voice_id}.speaker.safetensors"
     )
+    legacy_voice = voice_registry.get_file(voice_id)
     if output_path.is_file():
+        if legacy_voice is not None:
+            legacy_voice.path.unlink(missing_ok=True)
         return JSONResponse(
             status_code=200,
             content={
@@ -296,10 +299,14 @@ async def create_temporal_speaker_state(
             },
         )
     try:
-        voice_registry.resolve(voice_id)
+        existing_voice = voice_registry.resolve(voice_id)
     except KeyError:
-        pass
-    else:
+        existing_voice = None
+    if existing_voice is not None and (
+        legacy_voice is None
+        or existing_voice.ref_wav is None
+        or Path(existing_voice.ref_wav) != legacy_voice.path
+    ):
         raise HTTPException(status_code=409, detail=f"Voice {voice_id!r} already exists.")
 
     with TemporaryDirectory(prefix="irodori-temporal-state-") as directory:
@@ -319,6 +326,7 @@ async def create_temporal_speaker_state(
             reference_path = Path(directory) / f"reference-{index}.wav"
             reference_path.write_bytes(data)
             reference_paths.append(reference_path)
+        generated_path = Path(directory) / "speaker-state.safetensors"
 
         try:
             runtime = await _run_blocking(runtime_manager.get)
@@ -326,17 +334,22 @@ async def create_temporal_speaker_state(
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         synthesis_semaphore = await _acquire_synthesis_slot()
         try:
-            result = await _run_blocking(
-                cache_temporal_speaker_state_from_files,
-                reference_paths=reference_paths,
-                output_path=output_path,
-                runtime=runtime,
-            )
-        except FileExistsError:
-            result = {
-                "reference_count": TEMPORAL_REFERENCE_COUNT,
-                "bytes": output_path.stat().st_size,
-            }
+            if output_path.is_file():
+                result = {
+                    "reference_count": TEMPORAL_REFERENCE_COUNT,
+                    "bytes": output_path.stat().st_size,
+                }
+            else:
+                result = await _run_blocking(
+                    cache_temporal_speaker_state_from_files,
+                    reference_paths=reference_paths,
+                    output_path=generated_path,
+                    runtime=runtime,
+                )
+                generated_path.replace(output_path)
+                result["output_path"] = str(output_path)
+            if legacy_voice is not None:
+                legacy_voice.path.unlink(missing_ok=True)
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         finally:

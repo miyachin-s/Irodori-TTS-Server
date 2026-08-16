@@ -255,6 +255,59 @@ def test_temporal_speaker_state_requires_three_wavs_and_registers_voice(
     assert (tmp_path / "designed.speaker.safetensors").read_bytes() == b"speaker-state"
 
 
+def test_temporal_speaker_state_safely_migrates_legacy_wav(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "voice_registry", VoiceRegistry(main.settings))
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=object()))
+    wav = b"RIFF0000WAVE" + b"x" * 32
+
+    def post_state(client, voice_id):
+        return client.post(
+            "/v1/audio/voices/temporal-state",
+            data={"voice_id": voice_id},
+            files=[
+                ("reference_wavs", (f"{index}.wav", wav, "audio/wav"))
+                for index in range(1, 4)
+            ],
+        )
+
+    legacy_path = tmp_path / "legacy.wav"
+    legacy_path.write_bytes(wav)
+
+    def successful_cache(*, reference_paths, output_path, runtime):
+        assert legacy_path.is_file()
+        assert output_path != tmp_path / "legacy.speaker.safetensors"
+        output_path.write_bytes(b"speaker-state")
+        return {
+            "reference_count": 3,
+            "speaker_tokens": 195,
+            "bytes": output_path.stat().st_size,
+            "output_path": str(output_path),
+        }
+
+    monkeypatch.setattr(main, "cache_temporal_speaker_state_from_files", successful_cache)
+    client = TestClient(main.app)
+    migrated = post_state(client, "legacy")
+
+    assert migrated.status_code == 201
+    assert migrated.json()["output_path"] == str(tmp_path / "legacy.speaker.safetensors")
+    assert not legacy_path.exists()
+    assert (tmp_path / "legacy.speaker.safetensors").read_bytes() == b"speaker-state"
+
+    preserved_path = tmp_path / "preserved.wav"
+    preserved_path.write_bytes(wav)
+
+    def failing_cache(**_kwargs):
+        assert preserved_path.is_file()
+        raise RuntimeError("encoding failed")
+
+    monkeypatch.setattr(main, "cache_temporal_speaker_state_from_files", failing_cache)
+    failed = post_state(client, "preserved")
+
+    assert failed.status_code == 400
+    assert preserved_path.read_bytes() == wav
+    assert not (tmp_path / "preserved.speaker.safetensors").exists()
+
+
 def test_speech_returns_503_when_model_is_loading(monkeypatch):
     monkeypatch.setattr(
         main,
