@@ -10,6 +10,8 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from functools import partial
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Literal
 
 import torch
@@ -24,10 +26,13 @@ from irodori_tts.inference_runtime import SamplingRequest, SamplingResult
 from .audio import CONTENT_TYPES, encode_audio, normalize_response_format
 from .config import get_settings
 from .runtime import RuntimeLoadTimeoutError, RuntimeManager
+from .temporal_state import cache_temporal_speaker_state_from_files
 from .voices import VoiceRegistry, VoiceSpec
 
 logger = logging.getLogger(__name__)
 CHUNK_BOUNDARIES = frozenset("。、，,．.!！?？\n\r")
+TEMPORAL_REFERENCE_COUNT = 3
+TEMPORAL_REFERENCE_MAX_BYTES = 8 * 1024 * 1024
 _synthesis_semaphore: asyncio.Semaphore | None = None
 _synthesis_semaphore_limit: int | None = None
 _empty_cache_lock = threading.Lock()
@@ -254,6 +259,106 @@ async def upload_voice(
 
     logger.info("voice uploaded: %s", voice_file.path)
     return JSONResponse(status_code=201, content=voice_file.metadata())
+
+
+@app.post(
+    "/v1/audio/voices/temporal-state",
+    status_code=201,
+    dependencies=[Depends(require_auth)],
+)
+async def create_temporal_speaker_state(
+    voice_id: str = Form(...),
+    reference_wavs: list[UploadFile] = File(...),
+) -> JSONResponse:
+    try:
+        voice_registry.validate_voice_id(voice_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if len(reference_wavs) != TEMPORAL_REFERENCE_COUNT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Exactly {TEMPORAL_REFERENCE_COUNT} reference_wavs files are required.",
+        )
+
+    output_path = (
+        Path(voice_registry.ensure_dir()) / f"{voice_id}.speaker.safetensors"
+    )
+    if output_path.is_file():
+        return JSONResponse(
+            status_code=200,
+            content={
+                "id": voice_id,
+                "object": "voice_file",
+                "filename": output_path.name,
+                "bytes": output_path.stat().st_size,
+                "reference_count": TEMPORAL_REFERENCE_COUNT,
+                "reused": True,
+            },
+        )
+    try:
+        voice_registry.resolve(voice_id)
+    except KeyError:
+        pass
+    else:
+        raise HTTPException(status_code=409, detail=f"Voice {voice_id!r} already exists.")
+
+    with TemporaryDirectory(prefix="irodori-temporal-state-") as directory:
+        reference_paths = []
+        for index, upload in enumerate(reference_wavs, start=1):
+            data = await upload.read(TEMPORAL_REFERENCE_MAX_BYTES + 1)
+            if (
+                len(data) < 44
+                or len(data) > TEMPORAL_REFERENCE_MAX_BYTES
+                or data[:4] != b"RIFF"
+                or data[8:12] != b"WAVE"
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"reference_wavs item {index} must be a bounded RIFF/WAVE file.",
+                )
+            reference_path = Path(directory) / f"reference-{index}.wav"
+            reference_path.write_bytes(data)
+            reference_paths.append(reference_path)
+
+        try:
+            runtime = await _run_blocking(runtime_manager.get)
+        except RuntimeLoadTimeoutError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        synthesis_semaphore = await _acquire_synthesis_slot()
+        try:
+            result = await _run_blocking(
+                cache_temporal_speaker_state_from_files,
+                reference_paths=reference_paths,
+                output_path=output_path,
+                runtime=runtime,
+            )
+        except FileExistsError:
+            result = {
+                "reference_count": TEMPORAL_REFERENCE_COUNT,
+                "bytes": output_path.stat().st_size,
+            }
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            _release_synthesis_slot(synthesis_semaphore)
+
+    logger.info(
+        "temporal speaker state created: voice=%s references=%d tokens=%s bytes=%s",
+        voice_id,
+        TEMPORAL_REFERENCE_COUNT,
+        result.get("speaker_tokens"),
+        result["bytes"],
+    )
+    return JSONResponse(
+        status_code=201,
+        content={
+            "id": voice_id,
+            "object": "voice_file",
+            "filename": output_path.name,
+            **result,
+            "reused": "speaker_tokens" not in result,
+        },
+    )
 
 
 @app.get("/v1/audio/voices/{voice_id}", dependencies=[Depends(require_auth)])

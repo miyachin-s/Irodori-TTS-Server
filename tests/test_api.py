@@ -190,6 +190,71 @@ def test_voice_upload_rejects_duplicate_bad_id_and_bad_extension(monkeypatch):
     assert bad_extension.status_code == 400
 
 
+def test_temporal_speaker_state_requires_three_wavs_and_registers_voice(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(main, "voice_registry", VoiceRegistry(main.settings))
+    monkeypatch.setattr(main, "runtime_manager", FakeRuntimeManager(runtime=object()))
+    calls = []
+
+    def fake_cache(*, reference_paths, output_path, runtime):
+        calls.append((reference_paths, output_path, runtime))
+        assert len(reference_paths) == 3
+        assert all(path.read_bytes() == b"RIFF0000WAVE" + b"x" * 32 for path in reference_paths)
+        output_path.write_bytes(b"speaker-state")
+        return {
+            "reference_count": 3,
+            "reference_frames": 777,
+            "speaker_tokens": 195,
+            "speaker_dim": 768,
+            "bytes": output_path.stat().st_size,
+            "output_path": str(output_path),
+        }
+
+    monkeypatch.setattr(main, "cache_temporal_speaker_state_from_files", fake_cache)
+    client = TestClient(main.app)
+    wav = b"RIFF0000WAVE" + b"x" * 32
+
+    missing = client.post(
+        "/v1/audio/voices/temporal-state",
+        data={"voice_id": "designed"},
+        files=[("reference_wavs", ("one.wav", wav, "audio/wav"))],
+    )
+    created = client.post(
+        "/v1/audio/voices/temporal-state",
+        data={"voice_id": "designed"},
+        files=[
+            ("reference_wavs", ("one.wav", wav, "audio/wav")),
+            ("reference_wavs", ("two.wav", wav, "audio/wav")),
+            ("reference_wavs", ("three.wav", wav, "audio/wav")),
+        ],
+    )
+    listed = client.get("/v1/audio/voices")
+    reused = client.post(
+        "/v1/audio/voices/temporal-state",
+        data={"voice_id": "designed"},
+        files=[
+            ("reference_wavs", ("one.wav", wav, "audio/wav")),
+            ("reference_wavs", ("two.wav", wav, "audio/wav")),
+            ("reference_wavs", ("three.wav", wav, "audio/wav")),
+        ],
+    )
+
+    assert missing.status_code == 400
+    assert created.status_code == 201
+    assert created.json()["speaker_tokens"] == 195
+    assert created.json()["reused"] is False
+    assert len(calls) == 1
+    assert any(
+        item["id"] == "designed" and item["ref_embed"]
+        for item in listed.json()["data"]
+    )
+    assert reused.status_code == 200
+    assert reused.json()["reused"] is True
+    assert (tmp_path / "designed.speaker.safetensors").read_bytes() == b"speaker-state"
+
+
 def test_speech_returns_503_when_model_is_loading(monkeypatch):
     monkeypatch.setattr(
         main,
