@@ -1146,6 +1146,24 @@ def test_empty_cache_due_follows_configured_interval(monkeypatch, interval, expe
     assert [main._empty_cache_due() for _ in range(5)] == expected
 
 
+def test_mps_memory_logging_reports_allocated_and_driver_bytes(monkeypatch, caplog):
+    class FakeMps:
+        def is_available(self):
+            return True
+
+        def current_allocated_memory(self):
+            return 2 * 1024 * 1024
+
+        def driver_allocated_memory(self):
+            return 3 * 1024 * 1024
+
+    monkeypatch.setattr(main.torch, "mps", FakeMps())
+    with caplog.at_level("INFO"):
+        main._log_mps_memory("before")
+    assert "mps_memory stage=before" in caplog.text
+    assert "current_mib=2.0 driver_mib=3.0" in caplog.text
+
+
 def test_empty_cache_due_counts_failed_syntheses(monkeypatch):
     runtime = FakeRuntime(exc=RuntimeError("boom"))
     monkeypatch.setattr(main.settings, "empty_cache_interval", 2)

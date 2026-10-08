@@ -13,26 +13,29 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "python-multipart>=0.0.9",
     "soundfile>=0.13.1",
-    "torch>=2.10.0,<2.11.0",
-    "torchaudio>=2.10.0,<2.11.0",
+    "torch>=2.10.0,<2.11.0; sys_platform != 'darwin'",
+    "torch>=2.13.0,<2.14.0; sys_platform == 'darwin'",
+    "torchaudio>=2.10.0,<2.11.0; sys_platform != 'darwin'",
+    "torchaudio>=2.11.0,<2.12.0; sys_platform == 'darwin'",
+    "torchcodec>=0.17.0,<0.18.0; sys_platform == 'darwin'",
     "uvicorn[standard]>=0.32.0",
 ]
 
 [project.optional-dependencies]
 cpu = [
-    "torch>=2.10.0,<2.11.0",
-    "torchao>=0.16.0,<0.17.0",
-    "torchaudio>=2.10.0,<2.11.0",
+    "torch>=2.10.0,<2.11.0; sys_platform != 'darwin'",
+    "torchao>=0.16.0,<0.17.0; sys_platform != 'darwin'",
+    "torchaudio>=2.10.0,<2.11.0; sys_platform != 'darwin'",
 ]
 cu128 = [
-    "torch>=2.10.0,<2.11.0",
-    "torchao>=0.16.0,<0.17.0",
-    "torchaudio>=2.10.0,<2.11.0",
+    "torch>=2.10.0,<2.11.0; sys_platform != 'darwin'",
+    "torchao>=0.16.0,<0.17.0; sys_platform != 'darwin'",
+    "torchaudio>=2.10.0,<2.11.0; sys_platform != 'darwin'",
 ]
 rocm = [
-    "torch>=2.10.0,<2.11.0",
-    "torchao>=0.16.0,<0.17.0",
-    "torchaudio>=2.10.0,<2.11.0",
+    "torch>=2.10.0,<2.11.0; sys_platform != 'darwin'",
+    "torchao>=0.16.0,<0.17.0; sys_platform != 'darwin'",
+    "torchaudio>=2.10.0,<2.11.0; sys_platform != 'darwin'",
     "pytorch-triton-rocm>=3.5.1; sys_platform == 'linux'",
     "triton-rocm>=3.6.0; sys_platform == 'linux'",
 ]
@@ -46,6 +49,10 @@ dev = [
 irodori-openai-tts = "irodori_openai_tts.__main__:main"
 
 [tool.uv]
+override-dependencies = [
+    "torchcodec>=0.17.0,<0.18.0; sys_platform == 'darwin'",
+    "torchcodec>=0.10.0,<0.11.0; sys_platform != 'darwin'",
+]
 conflicts = [
     [
         { extra = "cpu" },

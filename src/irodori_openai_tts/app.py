@@ -596,6 +596,21 @@ async def _run_blocking(func: Any, *args: Any, **kwargs: Any) -> Any:
     return await loop.run_in_executor(None, partial(func, *args, **kwargs))
 
 
+def _log_mps_memory(stage: str) -> None:
+    try:
+        if not torch.mps.is_available():
+            return
+        logger.info(
+            "mps_memory stage=%s pid=%d current_mib=%.1f driver_mib=%.1f",
+            stage,
+            os.getpid(),
+            torch.mps.current_allocated_memory() / (1024 * 1024),
+            torch.mps.driver_allocated_memory() / (1024 * 1024),
+        )
+    except Exception:
+        logger.warning("mps_memory sample failed at stage=%s", stage, exc_info=True)
+
+
 def _synthesize_once(runtime: Any, request: SamplingRequest) -> SamplingResult:
     """Run one synthesis and hand the device allocator cache back periodically.
 
@@ -603,11 +618,14 @@ def _synthesize_once(runtime: Any, request: SamplingRequest) -> SamplingResult:
     runs while the server keeps a runtime resident. Long-lived serving therefore
     accumulates allocator blocks across requests.
     """
+    _log_mps_memory("before")
     try:
         return runtime.synthesize(request, log_fn=_log_runtime_message)
     finally:
+        _log_mps_memory("after")
         if _empty_cache_due():
             _release_device_cache(runtime)
+            _log_mps_memory("cache_released")
 
 
 MPS_OUT_OF_MEMORY_MESSAGE = "MPS backend out of memory"
@@ -974,6 +992,10 @@ def _sse_openai_error_event(exc: HTTPException) -> str:
 
 def _log_runtime_message(message: str) -> None:
     logger.info("irodori runtime: %s", message)
+    for stage in ("sample_rf", "decode_latent", "silentcipher_watermark"):
+        if message.startswith(f"[runtime] {stage}"):
+            _log_mps_memory(stage)
+            break
 
 
 def _audio_as_channels_first(audio: torch.Tensor) -> torch.Tensor:
