@@ -1,4 +1,8 @@
 .env
+.env.before-*
+.DS_Store
+stdout.log
+stderr.log
 .venv/
 __pycache__/
 *.py[cod]
